@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Events{% endblock %}
+{% block content %}
+<section class="page-head">
+  <p class="eyebrow">Box office · Now booking</p>
+  <h1>Pick an event,<br>keep the stub.</h1>
+  <p class="lede">Reserve a seat in seconds. Your ticket code is emailed to you as soon as the booking is confirmed.</p>
+  <p class="source">Event list served from <strong id="source">…</strong></p>
+</section>
+
+<div id="flash" class="flash" hidden></div>
+<div id="events" class="grid"></div>
+
+<dialog id="book-dialog">
+  <form id="book-form" method="dialog">
+    <h2>Book a seat</h2>
+    <p id="dialog-event" class="dialog-event"></p>
+    <label>Full name <input name="name" type="text" required autocomplete="name"></label>
+    <label>Email for your ticket <input name="email" type="email" required autocomplete="email"></label>
+    <div class="actions">
+      <button type="button" class="btn ghost" id="cancel">Cancel</button>
+      <button type="submit" class="btn">Book seat</button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const grid = document.getElementById('events');
+const dialog = document.getElementById('book-dialog');
+const form = document.getElementById('book-form');
+const flash = document.getElementById('flash');
+let selected = null;
+let firstLoad = true;
+
+function showFlash(msg, ok) {
+  flash.innerHTML = msg;
+  flash.className = 'flash ' + (ok ? 'ok' : 'err');
+  flash.hidden = false;
+}
+
+async function loadEvents() {
+  const res = await fetch('/api/events');
+  const data = await res.json();
+  document.getElementById('source').textContent = data.source;
+  grid.innerHTML = '';
+  data.events.forEach((e, i) => {
+    const d = new Date(e.date + 'T00:00');
+    const soldOut = e.seats_left === 0;
+    const low = !soldOut && e.seats_left <= 3;
+    const card = document.createElement('article');
+    card.className = 'ticket' + (soldOut ? ' sold' : '');
+    if (firstLoad) card.style.setProperty('--i', i); else card.style.animation = 'none';
+    card.innerHTML = `
+      <div class="ticket-date">
+        <span class="mon">${d.toLocaleDateString('en', {month: 'short'})}</span>
+        <span class="day">${d.getDate()}</span>
+        <span class="yr">${d.getFullYear()}</span>
+      </div>
+      <div class="ticket-main"><h3></h3><p class="venue"></p></div>
+      <div class="stub">
+        <span class="seats ${soldOut ? 'out' : low ? 'low' : ''}"><b>${e.seats_left}</b>${soldOut ? 'sold out' : e.seats_left === 1 ? 'seat left' : 'seats left'}</span>
+        <button class="btn" ${soldOut ? 'disabled' : ''}>${soldOut ? 'Sold out' : 'Book seat'}</button>
+      </div>`;
+    card.querySelector('h3').textContent = e.name;
+    card.querySelector('.venue').textContent = e.venue;
+    card.querySelector('button').onclick = () => {
+      selected = e;
+      document.getElementById('dialog-event').textContent = `${e.name} · ${e.venue}`;
+      form.reset();
+      dialog.showModal();
+    };
+    grid.appendChild(card);
+  });
+  firstLoad = false;
+}
+
+document.getElementById('cancel').onclick = () => dialog.close();
+
+form.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(form);
+  const email = fd.get('email');
+  const res = await fetch('/api/bookings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({event_id: selected.id, name: fd.get('name'), email}),
+  });
+  const data = await res.json();
+  dialog.close();
+  if (res.ok) {
+    localStorage.setItem('ticketq-email', email);
+    showFlash(`Seat booked. Booking #${data.booking_id} is <strong>pending</strong> while your ticket is issued. <a href="/bookings">Track it in My Bookings</a>`, true);
+  } else {
+    showFlash(data.error || 'Booking failed. Try again.', false);
+  }
+  loadEvents();
+});
+
+loadEvents();
+</script>
+{% endblock %}

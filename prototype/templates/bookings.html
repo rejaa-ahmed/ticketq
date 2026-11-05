@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}My Bookings{% endblock %}
+{% block content %}
+<section class="page-head">
+  <p class="eyebrow">Your tickets</p>
+  <h1>My bookings</h1>
+  <p class="lede">New bookings show as <em>pending</em> until your ticket is issued, usually within a few seconds.</p>
+  <form id="filter" class="filter">
+    <input id="email" type="email" placeholder="Your email (leave empty to see all)">
+    <button class="btn ghost">Show</button>
+  </form>
+</section>
+
+<table class="table">
+  <thead><tr><th>#</th><th>Event</th><th>Name</th><th>Status</th><th>Ticket code</th><th>Booked</th></tr></thead>
+  <tbody id="rows"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+</table>
+
+<section class="panel">
+  <h2>Behind the scenes</h2>
+  <p class="muted">Live view of the booking queue, worker and cache, for the architecture demo.</p>
+  <div class="stats">
+    <div><span id="s-queue">0</span><label>Messages waiting (SQS)</label></div>
+    <div><span id="s-dlq">0</span><label>Dead-letter queue</label></div>
+    <div><span id="s-processed">0</span><label>Tickets issued by worker</label></div>
+    <div><span id="s-fails">0</span><label>Failed attempts</label></div>
+    <div><span id="s-cache">0 / 0</span><label>Cache hits / misses</label></div>
+  </div>
+  <div class="actions">
+    <label class="toggle"><input type="checkbox" id="fail"> Simulate email service outage</label>
+    <button class="btn ghost" id="redrive">Re-drive DLQ</button>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const emailInput = document.getElementById('email');
+emailInput.value = localStorage.getItem('ticketq-email') || '';
+
+function cell(text, cls) {
+  const td = document.createElement('td');
+  td.textContent = text ?? '—';
+  if (cls) td.className = cls;
+  return td;
+}
+
+async function loadBookings() {
+  const q = emailInput.value.trim();
+  const res = await fetch('/api/bookings' + (q ? '?email=' + encodeURIComponent(q) : ''));
+  const { bookings } = await res.json();
+  const tbody = document.getElementById('rows');
+  tbody.innerHTML = '';
+  if (!bookings.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">No bookings yet. <a href="/">Pick an event</a> to book your first seat.</td></tr>';
+    return;
+  }
+  for (const b of bookings) {
+    const tr = document.createElement('tr');
+    tr.append(cell(b.id, 'num'), cell(b.event_name), cell(b.name));
+    const st = document.createElement('td');
+    st.innerHTML = `<span class="badge ${b.status.toLowerCase()}">${b.status === 'PENDING' ? 'Pending' : 'Confirmed'}</span>`;
+    tr.append(st, cell(b.ticket_code, 'code'), cell(b.created_at, 'num'));
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadSystem() {
+  const s = await (await fetch('/api/system')).json();
+  document.getElementById('s-queue').textContent = s.queue_depth;
+  document.getElementById('s-dlq').textContent = s.dlq_depth;
+  document.getElementById('s-processed').textContent = s.processed;
+  document.getElementById('s-fails').textContent = s.failed_attempts;
+  document.getElementById('s-cache').textContent = `${s.cache_hits} / ${s.cache_misses}`;
+  document.getElementById('fail').checked = s.simulate_failure;
+}
+
+document.getElementById('filter').addEventListener('submit', (e) => {
+  e.preventDefault();
+  localStorage.setItem('ticketq-email', emailInput.value.trim());
+  loadBookings();
+});
+document.getElementById('fail').addEventListener('change', async (e) => {
+  await fetch('/api/system/failure', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({on: e.target.checked})});
+  loadSystem();
+});
+document.getElementById('redrive').onclick = async () => { await fetch('/api/system/redrive', {method: 'POST'}); loadSystem(); };
+
+function refresh() { loadBookings(); loadSystem(); }
+refresh();
+setInterval(refresh, 2000);
+</script>
+{% endblock %}

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}TicketQ{% endblock %} · TicketQ</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="/">Ticket<span>Q</span></a>
+      <nav>
+        <a href="/" class="{{ 'active' if active == 'events' }}">Events</a>
+        <a href="/bookings" class="{{ 'active' if active == 'bookings' }}">My Bookings</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="wrap footer">
+    Prototype — Browser → Flask API → SQLite (RDS) · Cache (Redis) · Queue + Worker (SQS + Lambda)
+  </footer>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
