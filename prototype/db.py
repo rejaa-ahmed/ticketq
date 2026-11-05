@@ -13,6 +13,13 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 DB_PATH = Path(__file__).parent / "booking.db"
 IS_PG = bool(DATABASE_URL)
 
+if os.environ.get("VERCEL") and not IS_PG:
+    # Serverless file systems are read-only/ephemeral, so SQLite can't work there.
+    raise RuntimeError(
+        "DATABASE_URL is not set. In Vercel: Project → Settings → Environment Variables, "
+        "add DATABASE_URL (your Supabase connection string), then redeploy."
+    )
+
 if IS_PG:
     import psycopg
     from psycopg.rows import dict_row
