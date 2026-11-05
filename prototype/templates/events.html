@@ -90,6 +90,8 @@ form.addEventListener('submit', async (ev) => {
   const data = await res.json();
   dialog.close();
   if (res.ok) {
+    // Trigger a worker invocation (like SQS triggering Lambda); we don't wait for it.
+    fetch('/api/worker/run', {method: 'POST', keepalive: true}).catch(() => {});
     localStorage.setItem('ticketq-email', email);
     showFlash(`Seat booked. Booking #${data.booking_id} is <strong>pending</strong> while your ticket is issued. <a href="/bookings">Track it in My Bookings</a>`, true);
   } else {

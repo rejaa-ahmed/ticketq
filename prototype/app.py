@@ -8,7 +8,9 @@ import db
 import worker
 from cache import cache
 
-app = Flask(__name__)
+# Static files live in public/static so Vercel's CDN can serve them directly;
+# locally Flask serves the same folder at /static.
+app = Flask(__name__, static_folder="public/static", static_url_path="/static")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -44,18 +46,24 @@ def api_create_booking():
     if not name or not EMAIL_RE.match(email) or not isinstance(event_id, int):
         return jsonify({"error": "Please provide a name, a valid email and an event."}), 400
 
+    # Reserves the seat and queues a BookingCreated message in one transaction.
     booking_id = db.create_booking(event_id, name, email)
     if booking_id is None:
         return jsonify({"error": "Sorry, this event is sold out."}), 409
 
-    cache.invalidate("events")                  # seat count changed
-    worker.publish_booking_created(booking_id)  # async: don't wait for email/ticket
-    return jsonify({"booking_id": booking_id, "status": "PENDING"}), 202
+    cache.invalidate("events")  # seat count changed
+    return jsonify({"booking_id": booking_id, "status": "PENDING"}), 202  # don't wait for the ticket
 
 
 @app.get("/api/bookings")
 def api_list_bookings():
     return jsonify({"bookings": db.list_bookings(request.args.get("email"))})
+
+
+# ---------- Async worker (one call = one worker invocation, like Lambda) ----------
+@app.post("/api/worker/run")
+def api_worker_run():
+    return jsonify(worker.run_due())
 
 
 # ---------- Ops / demo controls ----------
@@ -66,7 +74,7 @@ def api_system():
 
 @app.post("/api/system/failure")
 def api_toggle_failure():
-    worker.state["simulate_failure"] = bool((request.get_json(silent=True) or {}).get("on"))
+    worker.set_failure(bool((request.get_json(silent=True) or {}).get("on")))
     return jsonify(worker.stats())
 
 
@@ -75,9 +83,9 @@ def api_redrive():
     return jsonify({"redriven": worker.redrive_dlq()})
 
 
-# Runs on import, so it works both with `python app.py` and with gunicorn (Render).
+# Runs on import, so it works with `python app.py`, gunicorn and Vercel.
 db.init_db()
-worker.start()
+worker.start()  # local background worker; skipped on Vercel
 
 if __name__ == "__main__":
     app.run(debug=False, port=int(os.environ.get("PORT", 5000)))

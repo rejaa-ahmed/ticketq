@@ -73,7 +73,13 @@ async function loadSystem() {
   document.getElementById('s-fails').textContent = s.failed_attempts;
   document.getElementById('s-cache').textContent = `${s.cache_hits} / ${s.cache_misses}`;
   document.getElementById('fail').checked = s.simulate_failure;
+  // While messages are waiting (e.g. retries), keep invoking the worker.
+  if (s.queue_depth > 0 && !workerBusy) {
+    workerBusy = true;
+    fetch('/api/worker/run', {method: 'POST'}).catch(() => {}).finally(() => { workerBusy = false; });
+  }
 }
+let workerBusy = false;
 
 document.getElementById('filter').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -85,9 +91,12 @@ document.getElementById('fail').addEventListener('change', async (e) => {
   loadSystem();
 });
 document.getElementById('redrive').onclick = async () => { await fetch('/api/system/redrive', {method: 'POST'}); loadSystem(); };
+// The DB connection can be slow on a cold start; refresh only after the previous one finishes.
 
-function refresh() { loadBookings(); loadSystem(); }
+async function refresh() {
+  try { await Promise.all([loadBookings(), loadSystem()]); } catch (e) { /* retry on next tick */ }
+  setTimeout(refresh, 2000);
+}
 refresh();
-setInterval(refresh, 2000);
 </script>
 {% endblock %}
