@@ -83,6 +83,30 @@ def api_redrive():
     return jsonify({"redriven": worker.redrive_dlq()})
 
 
+# ---------- Release info (CI/CD) ----------
+def _release_file(name):
+    path = os.path.join(app.root_path, name)
+    if not os.path.exists(path):
+        return ""
+    with open(path, encoding="utf-8") as f:
+        return f.read().strip()
+
+
+VERSION = _release_file("VERSION")
+BUILD = _release_file("BUILD")  # written by the pipeline; absent on Vercel and locally
+
+
+@app.context_processor
+def release_info():
+    return {"version": VERSION, "build": BUILD}
+
+
+@app.get("/health")
+def health():
+    db.list_events()  # fails the deployment check if the database is unusable
+    return jsonify({"status": "ok", "version": VERSION, "build": BUILD})
+
+
 # Runs on import, so it works with `python app.py`, gunicorn and Vercel.
 db.init_db()
 worker.start()  # local background worker; skipped on Vercel

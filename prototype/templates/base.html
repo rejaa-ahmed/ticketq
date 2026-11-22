@@ -23,7 +23,7 @@
     {% block content %}{% endblock %}
   </main>
   <footer class="wrap footer">
-    TicketQ prototype by Rejaa Ahmed · 28484 — Flask on Vercel · Supabase Postgres (RDS) · jobs queue + worker (SQS + Lambda) · cache (Redis)
+    TicketQ v{{ version }}{% if build %} ({{ build[:7] }}){% endif %} by Rejaa Ahmed · 28484 — {% if build %}Flask on AWS EC2 · SQLite{% else %}Flask on Vercel · Supabase Postgres (RDS){% endif %} · jobs queue + worker (SQS + Lambda) · cache (Redis)
   </footer>
   {% block scripts %}{% endblock %}
 </body>

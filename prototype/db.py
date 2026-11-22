@@ -151,7 +151,7 @@ def create_booking(event_id, name, email):
 def confirm_booking(booking_id, ticket_code):
     with connect() as conn:
         conn.run(
-            f"UPDATE bookings SET status = 'CONFIRMED', ticket_code = ?, confirmed_at = {NOW} WHERE id = ?",
+            f"UPDATE bookings SET status = 'CONFIRMED', ticket_code = ?, confirmed_at = {NOW} WHERE id = ?",  # NOW is a constant  # nosec B608
             (ticket_code, booking_id),
         )
 
@@ -193,7 +193,7 @@ def claim_job(visibility_timeout):
         row = conn.run(
             "UPDATE jobs SET status = 'PROCESSING', attempts = attempts + 1, available_at = ? "
             "WHERE id = (SELECT id FROM jobs WHERE status IN ('QUEUED', 'PROCESSING') "
-            f"AND available_at <= ? ORDER BY id LIMIT 1 {SKIP_LOCKED}) RETURNING *",
+            f"AND available_at <= ? ORDER BY id LIMIT 1 {SKIP_LOCKED}) RETURNING *",  # constant  # nosec B608
             (now + visibility_timeout, now),
         ).fetchone()
         return dict(row) if row else None

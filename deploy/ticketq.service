@@ -1,0 +1,27 @@
+[Unit]
+Description=TicketQ
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ticketq
+Group=ticketq
+WorkingDirectory=/opt/ticketq/current
+Environment=TZ=Asia/Karachi PYTHONDONTWRITEBYTECODE=1
+# One process only: the cache and the background worker live in memory.
+ExecStart=/opt/ticketq/current/venv/bin/gunicorn --bind 0.0.0.0:80 --workers 1 --threads 8 --no-control-socket app:app
+Restart=on-failure
+RestartSec=2
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/ticketq
+# The app has no need for the instance's AWS credentials.
+IPAddressDeny=169.254.169.254
+
+[Install]
+WantedBy=multi-user.target

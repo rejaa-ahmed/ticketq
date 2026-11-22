@@ -1,0 +1,177 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash # enables pipefail
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install --no-deps -r prototype/requirements-aws.txt
+      - name: Run unit tests
+        working-directory: prototype
+        run: python -m unittest discover -s tests -v
+
+  security:
+    name: Security scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # secret scan covers the whole history
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install scanners
+        run: pip install bandit==1.9.4 pip-audit==2.10.1
+      - name: SAST (Bandit)
+        run: bandit -r prototype -x '*/tests/*,*/.venv/*' --severity-level medium
+      - name: Dependency scan (pip-audit)
+        run: pip-audit --no-deps --disable-pip -r prototype/requirements-aws.txt
+      - name: Secret scan (Gitleaks)
+        env:
+          VERSION: "8.30.1"
+          SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSLo gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          echo "$SHA256  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz gitleaks
+          ./gitleaks git --redact --no-banner "$GITHUB_WORKSPACE"
+
+  build:
+    name: Build
+    needs: [test, security]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Package application
+        run: bash deploy/build.sh "$GITHUB_SHA" "${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build
+          path: dist/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  store:
+    name: Store in S3
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      id-token: write # short-lived AWS login, no stored keys
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build
+          path: dist
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Upload build and mark it latest
+        env:
+          BUCKET: ${{ vars.S3_BUCKET }}
+        run: |
+          file=$(basename dist/*.zip)
+          name=${file%.zip}
+          sha=$(cat "dist/$name.sha256")
+          aws s3 cp "dist/$file" "s3://$BUCKET/builds/$file" --no-progress
+          jq -n --arg name "$name" --arg sha256 "$sha" '{name: $name, sha256: $sha256}' > latest.json
+          aws s3 cp latest.json "s3://$BUCKET/latest.json" --no-progress
+          echo "Stored s3://$BUCKET/builds/$file" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to production
+    needs: store
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy latest build from S3
+        env:
+          BUCKET: ${{ vars.S3_BUCKET }}
+          INSTANCE: ${{ vars.EC2_INSTANCE_ID }}
+        run: |
+          latest=$(aws s3 cp "s3://$BUCKET/latest.json" -)
+          name=$(jq -r .name <<< "$latest")
+          sha=$(jq -r .sha256 <<< "$latest")
+          # Both values end up in a root shell on the server, so validate them.
+          [[ $name =~ ^build-v[0-9.]+-[0-9.]+-[0-9a-f]{7}$ && $sha =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid latest.json"; exit 1; }
+          echo "Latest successful build: $name"
+
+          script="set -eu
+          d=\$(mktemp -d)
+          trap 'rm -rf \"\$d\"' EXIT
+          cloud-init status --wait > /dev/null || true
+          aws s3 cp 's3://$BUCKET/builds/$name.zip' \"\$d/build.zip\" --no-progress
+          echo \"$sha  \$d/build.zip\" | sha256sum -c -
+          unzip -q \"\$d/build.zip\" -d \"\$d/x\"
+          bash \"\$d/x/deploy.sh\" '$name'"
+          params=$(jq -n --arg s "$script" '{commands: [$s], executionTimeout: ["480"]}')
+          id=$(aws ssm send-command --instance-ids "$INSTANCE" --document-name AWS-RunShellScript \
+            --parameters "$params" --query Command.CommandId --output text)
+
+          status=Pending
+          for _ in {1..120}; do
+            sleep 5
+            status=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE" --query Status --output text 2> /dev/null || echo Pending)
+            case $status in Pending | InProgress | Delayed) ;; *) break ;; esac
+          done
+          aws ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE" \
+            --query '[StandardOutputContent,StandardErrorContent]' --output text
+          [[ $status == Success ]] || { echo "Deployment failed: $status"; exit 1; }
+      - name: Verify production
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          for _ in {1..20}; do
+            if body=$(curl -fsS --max-time 5 "$APP_URL/health") && [[ $(jq -r .build <<< "$body") == "$GITHUB_SHA" ]]; then
+              echo "$body"
+              echo "Live: $APP_URL (v$(jq -r .version <<< "$body"))" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Production is not serving commit $GITHUB_SHA"
+          exit 1

@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: TicketQ CI/CD - S3 artifacts, EC2 web server, GitHub Actions OIDC role
+
+Parameters:
+  GitHubSubject:
+    Type: String
+    # This repo uses GitHub's immutable subject format (owner@id/repo@id).
+    Default: "repo:rejaa-ahmed@211780251/ticketq@1446798357:ref:refs/heads/main"
+    AllowedPattern: "^repo:[^*?]+:ref:refs/heads/main$"
+    Description: Only workflows with exactly this OIDC subject can deploy
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: Leave empty unless this AWS account already has a GitHub OIDC provider
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro] # deliberately nothing larger, to protect credits
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Conditions:
+  CreateOidc: !Equals [!Ref ExistingOidcProviderArn, ""]
+
+Resources:
+  Artifacts:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # No versioning: build names are already unique, and old copies cost storage.
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-builds
+            Status: Enabled
+            Prefix: builds/
+            ExpirationInDays: 14
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  GitHubOidc:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidc
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: read-builds
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub ${Artifacts.Arn}/builds/*
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: TicketQ HTTP only, administration goes through SSM
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!GetAtt WebSecurityGroup.GroupId]
+      CreditSpecification:
+        CPUCredits: standard # t3 defaults to unlimited, which can bill extra
+      Monitoring: false # detailed monitoring is paid
+      MetadataOptions:
+        HttpTokens: required
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y python3.12 python3.12-pip unzip
+      Tags:
+        - { Key: Name, Value: ticketq }
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOidc, !Ref GitHubOidc, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Ref GitHubSubject
+      Policies:
+        - PolicyName: store-and-deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource:
+                  - !Sub ${Artifacts.Arn}/builds/*
+                  - !Sub ${Artifacts.Arn}/latest.json
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub ${Artifacts.Arn}/latest.json
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript
+                  - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${WebServer}
+              - Effect: Allow
+                Action: ssm:GetCommandInvocation
+                Resource: "*" # this action does not support resource-level permissions
+
+Outputs:
+  RoleArn:
+    Description: GitHub variable AWS_ROLE_ARN
+    Value: !GetAtt DeployRole.Arn
+  Region:
+    Description: GitHub variable AWS_REGION
+    Value: !Ref AWS::Region
+  Bucket:
+    Description: GitHub variable S3_BUCKET
+    Value: !Ref Artifacts
+  InstanceId:
+    Description: GitHub variable EC2_INSTANCE_ID
+    Value: !Ref WebServer
+  AppUrl:
+    Description: GitHub variable APP_URL (changes if the instance is stopped and started)
+    Value: !Sub http://${WebServer.PublicIp}

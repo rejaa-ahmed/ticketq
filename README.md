@@ -20,6 +20,19 @@ Software architecture design for an event/ticket booking application:
 | ElastiCache (Redis) | In-process TTL cache (per function instance) |
 | CI/CD | **GitHub** → Vercel auto-deploy on every push |
 
+## CI/CD to AWS
+
+`.github/workflows/ci-cd.yml` runs on every push to `main`:
+
+unit tests + security scans (Bandit, pip-audit, Gitleaks) → build zip → S3 → EC2 → health check
+
+- `infra/aws.yml` – CloudFormation for S3, EC2 and the GitHub OIDC role (no stored AWS keys)
+- `deploy/` – build script, systemd service and install script with automatic rollback
+- `prototype/tests/` – unit tests: `cd prototype`, then `python -m unittest discover -s tests`
+- `prototype/requirements-aws.txt` – pinned versions used by the tests and the EC2 build
+
+The EC2 copy uses its own SQLite database. The Vercel deployment is separate and keeps Supabase.
+
 ## Deploying (free, no card)
 
 1. **Supabase** – create a project → **Connect** → **Direct** (connection string) →
